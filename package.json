@@ -1,0 +1,21 @@
+{
+  "name": "voiceforge-netlify",
+  "version": "1.0.0",
+  "description": "AI Voice Clone Studio - Netlify Functions",
+  "main": "index.js",
+  "scripts": {
+    "dev": "netlify dev",
+    "deploy": "netlify deploy --prod"
+  },
+  "keywords": ["voice-cloning", "elevenlabs", "netlify"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.20.0",
+    "form-data": "^4.0.0",
+    "parse-multipart-data": "^1.5.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  }
+}
