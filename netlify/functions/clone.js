@@ -1,6 +1,7 @@
-// Voice Clone Function
+// Voice Clone Function - Fixed Version
 const axios = require('axios');
-const multipart = require('parse-multipart-data');
+const Busboy = require('busboy');
+const FormData = require('form-data');
 
 const API_BASE = 'https://api.elevenlabs.io/v1';
 
@@ -33,109 +34,154 @@ exports.handler = async function(event, context) {
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           error: 'API Key Missing',
-          details: 'ElevenLabs API key set koren ni. Netlify Dashboard → Site Settings → Environment Variables e ELEVENLABS_API_KEY add korun.'
+          details: 'ElevenLabs API key set koren ni.'
         })
       };
     }
 
-    // Parse multipart form data from base64 encoded body
+    // Parse multipart form data using Busboy
     const contentType = event.headers['content-type'] || event.headers['Content-Type'] || '';
-    const boundaryMatch = contentType.match(/boundary=(.+)/);
     
-    if (!boundaryMatch) {
-      return {
-        statusCode: 400,
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'Invalid content type. Multipart form data lagbe.' })
-      };
-    }
+    return new Promise((resolve, reject) => {
+      const busboy = Busboy({ headers: { 'content-type': contentType } });
+      
+      let audioFile = null;
+      let audioBuffer = null;
+      let voiceName = `My Voice ${Date.now()}`;
+      let voiceDescription = 'Custom cloned voice for promotional content';
 
-    const boundary = boundaryMatch[1];
-    const bodyBuffer = Buffer.from(event.body, 'base64');
-    const parts = multipart.parse(bodyBuffer, boundary);
+      busboy.on('file', (fieldname, file, info) => {
+        const { filename, mimeType } = info;
+        
+        if (fieldname === 'audio') {
+          const chunks = [];
+          file.on('data', (data) => chunks.push(data));
+          file.on('end', () => {
+            audioFile = { filename, mimeType };
+            audioBuffer = Buffer.concat(chunks);
+            console.log(`📁 File received: ${filename} (${audioBuffer.length} bytes)`);
+          });
+        }
+      });
 
-    let audioFile = null;
-    let voiceName = `My Voice ${Date.now()}`;
-    let voiceDescription = 'Custom cloned voice for promotional content';
+      busboy.on('field', (fieldname, value) => {
+        if (fieldname === 'voiceName' && value) {
+          voiceName = value;
+        } else if (fieldname === 'voiceDescription' && value) {
+          voiceDescription = value;
+        }
+      });
 
-    for (const part of parts) {
-      if (part.name === 'audio' && part.filename) {
-        audioFile = part;
-      } else if (part.name === 'voiceName') {
-        voiceName = Buffer.from(part.data).toString('utf-8');
-      } else if (part.name === 'voiceDescription') {
-        voiceDescription = Buffer.from(part.data).toString('utf-8');
-      }
-    }
+      busboy.on('finish', async () => {
+        if (!audioBuffer) {
+          resolve({
+            statusCode: 400,
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ error: 'Kono audio file upload koren ni.' })
+          });
+          return;
+        }
 
-    if (!audioFile) {
-      return {
-        statusCode: 400,
-        headers: { ...headers, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ error: 'Kono audio file upload koren ni.' })
-      };
-    }
+        console.log(`🎙️ Cloning voice: "${voiceName}" from ${audioFile.filename}`);
 
-    console.log(`🎙️ Cloning voice: "${voiceName}" from ${audioFile.filename}`);
+        try {
+          // Build FormData for ElevenLabs API
+          const form = new FormData();
+          form.append('name', voiceName);
+          form.append('description', voiceDescription);
+          form.append('files', audioBuffer, {
+            filename: audioFile.filename,
+            contentType: audioFile.mimeType || 'audio/mpeg'
+          });
 
-    // Build FormData for ElevenLabs API
-    const FormData = require('form-data');
-    const form = new FormData();
-    form.append('name', voiceName);
-    form.append('description', voiceDescription);
-    form.append('files', Buffer.from(audioFile.data), {
-      filename: audioFile.filename,
-      contentType: audioFile.type || 'audio/mpeg'
+          console.log('📤 Sending to ElevenLabs API...');
+
+          const response = await axios.post(
+            `${API_BASE}/voices/add`,
+            form,
+            {
+              headers: {
+                ...form.getHeaders(),
+                'xi-api-key': apiKey
+              },
+              timeout: 120000,
+              maxContentLength: Infinity,
+              maxBodyLength: Infinity
+            }
+          );
+
+          const clonedVoice = response.data;
+          console.log(`✅ Voice cloned: ${clonedVoice.voice_id}`);
+
+          resolve({
+            statusCode: 200,
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              success: true,
+              voice: {
+                id: clonedVoice.voice_id,
+                name: clonedVoice.name,
+                category: clonedVoice.category
+              }
+            })
+          });
+
+        } catch (apiError) {
+          console.error('❌ ElevenLabs API error:', apiError.response?.data || apiError.message);
+
+          let errorDetails = apiError.message;
+          if (apiError.response?.data?.detail) {
+            errorDetails = typeof apiError.response.data.detail === 'string' 
+              ? apiError.response.data.detail 
+              : JSON.stringify(apiError.response.data.detail);
+          } else if (apiError.response?.status === 401) {
+            errorDetails = 'API key invalid.';
+          } else if (apiError.response?.status === 429) {
+            errorDetails = 'Too many requests. Kichukhon pore try korun.';
+          } else if (apiError.response?.status === 400) {
+            errorDetails = `Bad request: ${errorDetails}`;
+          }
+
+          resolve({
+            statusCode: apiError.response?.status || 500,
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              error: 'Voice clone e problem hoyeche',
+              details: errorDetails
+            })
+          });
+        }
+      });
+
+      busboy.on('error', (error) => {
+        console.error('❌ Busboy error:', error);
+        resolve({
+          statusCode: 400,
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            error: 'File upload parse error',
+            details: error.message
+          })
+        });
+      });
+
+      // Parse the body
+      const bodyBuffer = event.isBase64Encoded 
+        ? Buffer.from(event.body, 'base64') 
+        : Buffer.from(event.body);
+      
+      busboy.end(bodyBuffer);
     });
 
-    const response = await axios.post(
-      `${API_BASE}/voices/add`,
-      form,
-      {
-        headers: {
-          ...form.getHeaders(),
-          'xi-api-key': apiKey
-        },
-        timeout: 120000,
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity
-      }
-    );
-
-    const clonedVoice = response.data;
-    console.log(`✅ Voice cloned: ${clonedVoice.voice_id}`);
-
-    return {
-      statusCode: 200,
-      headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        success: true,
-        voice: {
-          id: clonedVoice.voice_id,
-          name: clonedVoice.name,
-          category: clonedVoice.category
-        }
-      })
-    };
-
   } catch (error) {
-    console.error('Clone error:', error.response?.data || error.message);
-
-    let errorDetails = error.message;
-    if (error.response?.data?.detail) {
-      errorDetails = error.response.data.detail;
-    } else if (error.response?.status === 401) {
-      errorDetails = 'API key invalid.';
-    } else if (error.response?.status === 429) {
-      errorDetails = 'Too many requests. Kichukhon pore try korun.';
-    }
+    console.error('❌ Unexpected error:', error);
 
     return {
-      statusCode: error.response?.status || 500,
+      statusCode: 500,
       headers: { ...headers, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        error: 'Voice clone e problem hoyeche',
-        details: errorDetails
+        error: 'Unexpected error',
+        details: error.message
       })
     };
   }
